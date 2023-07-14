@@ -1,8 +1,19 @@
 version: '3'
 
+# Set up an external network for Graylog
+# https://www.reddit.com/r/docker/comments/fnt2k9/udp_packet_source_address_being_changed_to_bridge/
 networks:
   graynet:
     driver: bridge
+    #driver_opts: 
+      #com.docker.network.bridge.enable_ip_masquerade: "false"
+  
+
+secrets:
+  graylog_pw_sha2:
+    file: ./secrets/graylog/admin_sha2.txt
+  graylog_pepper:
+    file: ./secrets/graylog/pepper.txt
 
 # This is how you persist data between container restarts
 volumes:
@@ -14,6 +25,35 @@ volumes:
     driver: local
 
 services:
+  ubuntu:
+    image: nicolaka/netshoot
+    container_name: iptest
+    tty: true
+    networks:
+      - graynet
+    restart: always
+
+  # https://gist.github.com/ykarikos/06879cbb0d80828fe96445b504fa5b60
+  proxy:
+    image: nginx
+    container_name: proxy
+    restart: always
+    environment:
+      NGINX_HOST: ${EXT_URI}
+    ports: 
+      - 80:80/tcp
+      - 443:443/tcp
+    volumes:
+      - "/var/www/html:/var/www/html"
+      - "./config/nginx:/etc/nginx/templates"
+      - "${PWD}/cert:/etc/nginx/cert"
+      - "/etc/letsencryt:/etc/letsencrypt"
+    networks:
+      - graynet
+    depends_on:
+      graylog:
+        condition: "service_started"
+    
   # Graylog stores configuration in MongoDB
   mongo:
     image: mongo:6.0.5-jammy
@@ -22,7 +62,7 @@ services:
       - "mongo_data:/data/db"
     networks:
       - graynet
-    restart: unless-stopped
+    restart: always
 
   # The logs themselves are stored in Opensearch
   opensearch:
@@ -48,22 +88,20 @@ services:
       - 9200:9200/tcp
     networks:
       - graynet
-    restart: unless-stopped
+    restart: always
 
   graylog:
     image: graylog/graylog:5.1
     container_name: graylog
     environment:
-      # CHANGE ME (must be at least 16 characters)!
-      GRAYLOG_PASSWORD_SECRET: "somepasswordpepper"
-      # Password: admin
-      GRAYLOG_ROOT_PASSWORD_SHA2: "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918"
+      GRAYLOG_PASSWORD_SECRET__FILE: /run/secrets/graylog_pepper
+      GRAYLOG_ROOT_PASSWORD_SHA2__FILE: /run/secrets/graylog_pw_sha2
       GRAYLOG_HTTP_BIND_ADDRESS: "0.0.0.0:9000"
-      GRAYLOG_HTTP_EXTERNAL_URI: "http://localhost:9000/"
+      GRAYLOG_HTTP_EXTERNAL_URI: "https://${EXT_URI}:9443/"
       GRAYLOG_ELASTICSEARCH_HOSTS: "http://opensearch:9200"
       GRAYLOG_MONGODB_URI: "mongodb://mongodb:27017/graylog"
-      GRAYLOG_TIMEZONE: "America/Detroit"
-      TZ: "America/Detroit"
+      GRAYLOG_TIMEZONE: "${TIMEZONE}"
+      TZ: "${TIMEZONE}"
       GRAYLOG_TRANSPORT_EMAIL_PROTOCOL: "smtp"
       GRAYLOG_TRANSPORT_EMAIL_WEB_INTERFACE_URL: "http://192.168.3.233:9000/"
       GRAYLOG_TRANSPORT_EMAIL_HOSTNAME: "outbound.mailhop.org"
@@ -78,6 +116,9 @@ services:
       GRAYLOG_TRANSPORT_SUBJECT_PREFIX: "[graylog]"
 
     entrypoint: /usr/bin/tini -- wait-for-it opensearch:9200 -- /docker-entrypoint.sh
+    secrets:
+      - graylog_pw_sha2
+      - graylog_pepper
     volumes:
       - "${PWD}/config/graylog/graylog.conf:/usr/share/graylog/config/graylog.conf"
       - "graylog_data:/usr/share/graylog/data"
@@ -93,5 +134,10 @@ services:
       - 9000:9000/tcp   # Graylog web interface and REST API
       - 1514:1514/tcp   # Syslog
       - 1514:1514/udp   # Syslog
+      - 1515:1515/udp   # pfSense
+      - 1516:1516/udp   # Avaya ERS Switch
+      - 1517:1517/udp   # Avaya IPO
+      - 1518:1518/udp   # QNAPs
+      - 1519:1519/udp   # other devices?
       - 12201:12201/tcp # GELF
       - 12201:12201/udp # GELF
